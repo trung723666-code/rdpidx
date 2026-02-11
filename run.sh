@@ -1,67 +1,67 @@
 #!/usr/bin/env bash
 set -e
 
-### CONFIG - ĐIỀN THÔNG TIN CỦA BẠN VÀO ĐÂY ###
-NGROK_TOKEN="38WO5iYPn4Hq5A5SUOjtGptsxfE_7jDB4PmSF78GKcAguUo1H" # Token Ngrok bạn đã cung cấp
-TELEGRAM_TOKEN="8048006450:AAEcIwETKE8VkDN17GNRu73wifJ-CHPE2bI" # Token Telegram bạn đã cung cấp
+### CONFIG ###
+TELEGRAM_TOKEN="8048006450:AAEcIwETKE8VkDN17GNRu73wifJ-CHPE2bI"
 
-WORKDIR="$HOME/windows-idx"
+# Tự động lấy thư mục hiện tại của dự án
+PROJECT_DIR=$(pwd)
+WORKDIR="$PROJECT_DIR/windows-idx"
+
 DISK_FILE="$WORKDIR/win11.qcow2"
 FLAG_FILE="$WORKDIR/installed.flag"
 ISO_FILE="$WORKDIR/win11-gamer.iso"
 ISO_URL="https://go.microsoft.com/fwlink/p/?LinkID=2195443"
 
-RAM="16G"
-CORES="8"
-NGROK_DIR="$HOME/.ngrok"
-NGROK_BIN="$NGROK_DIR/ngrok"
-NGROK_CFG="$NGROK_DIR/ngrok.yml"
-NGROK_LOG="$NGROK_DIR/ngrok.log"
+RAM="8G"
+CORES="4"
 
 mkdir -p "$WORKDIR"
-mkdir -p "$NGROK_DIR"
 cd "$WORKDIR"
 
-### HÀM GỬI TELEGRAM (TỰ LẤY CHAT ID NGƯỜI DÙNG) ###
+### HÀM GỬI TELEGRAM ###
 send_tele() {
-    # Lấy ID của người nhắn tin gần nhất cho Bot (là chính bạn)
     local cid=$(curl -s "https://api.telegram.org/bot$TELEGRAM_TOKEN/getUpdates" | grep -oP '"id":\K\d+' | head -n 1)
-    if [ -z "$cid" ]; then
-        echo "❌ Chưa tìm thấy Chat ID. Bạn phải nhấn 'Start' trên Bot Telegram trước!"
-    else
-        curl -s -X POST "https://api.telegram.org/bot$TELEGRAM_TOKEN/sendMessage" \
-            -d "chat_id=$cid" \
-            -d "text=$1" > /dev/null
+    if [ -n "$cid" ]; then
+        curl -s -X POST "https://api.telegram.org/bot$TELEGRAM_TOKEN/sendMessage" -d "chat_id=$cid" -d "text=$1" > /dev/null
     fi
 }
 
-### 1. CÀI ĐẶT & KHỞI ĐỘNG NGROK ###
-if [ ! -f "$NGROK_BIN" ]; then
-    curl -sL https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-linux-amd64.tgz | tar -xz -C "$NGROK_DIR"
-    chmod +x "$NGROK_BIN"
+### 1. CÀI ĐẶT & CHẠY BORE ###
+if ! command -v bore &> /dev/null; then
+    echo "⏳ Đang tải Bore..."
+    curl -sL https://github.com/ekzhang/bore/releases/download/v0.5.1/bore-v0.5.1-x86_64-unknown-linux-musl.tar.gz | tar -xz
+    chmod +x bore
+    mv bore $HOME/bore
 fi
 
-cat > "$NGROK_CFG" <<EOF
-version: "2"
-authtoken: $NGROK_TOKEN
-tunnels:
-  rdp:
-    proto: tcp
-    addr: 3389
-EOF
+BORE_BIN="$HOME/bore"
+pkill -f bore 2>/dev/null || true
 
-pkill -f "$NGROK_BIN" 2>/dev/null || true
-"$NGROK_BIN" start --all --config "$NGROK_CFG" --log=stdout > "$NGROK_LOG" 2>&1 &
-sleep 12
+# Chạy Bore và lưu log vào WORKDIR
+$BORE_BIN local 5900 --to bore.pub > "$WORKDIR/vnc.log" 2>&1 &
+$BORE_BIN local 3389 --to bore.pub > "$WORKDIR/rdp.log" 2>&1 &
 
-RDP_ADDR=$(grep -oE 'tcp://[^ ]+' "$NGROK_LOG" | sed -n '1p')
-send_tele "🚀 Máy ảo Windows đang khởi động! 🔗 RDP của bạn: $RDP_ADDR"
+echo "⏳ Đang lấy địa chỉ kết nối..."
+sleep 10
 
-### 2. TIẾN TRÌNH DUY TRÌ & CẬP NHẬT MỖI 10 PHÚT ###
+VNC_ADDR=$(grep -oE 'bore.pub:[0-9]+' "$WORKDIR/vnc.log" | head -n 1)
+RDP_ADDR=$(grep -oE 'bore.pub:[0-9]+' "$WORKDIR/rdp.log" | head -n 1)
+
+MSG="🚀 Windows VM đã sẵn sàng!
+🛠️ Setup (VNC): $VNC_ADDR
+🔗 Sử dụng (RDP): $RDP_ADDR
+(Dùng VNC Viewer để cài đặt Windows trước)"
+
+echo "------------------------------------------"
+echo "$MSG"
+echo "------------------------------------------"
+send_tele "$MSG"
+
+### 2. TIẾN TRÌNH DUY TRÌ (MỖI 10 PHÚT) ###
 (
     while true; do
-        # Ghi log để duy trì hoạt động của hệ thống
-        echo "[$(date '+%H:%M:%S')] Hệ thống đang hoạt động..." >> "$WORKDIR/update.log"
+        echo "[$(date '+%H:%M:%S')] Keeping session alive..." >> "$WORKDIR/update.log"
         sleep 600
     done
 ) &
@@ -70,13 +70,13 @@ send_tele "🚀 Máy ảo Windows đang khởi động! 🔗 RDP của bạn: $R
 [ -f "$DISK_FILE" ] || qemu-img create -f qcow2 "$DISK_FILE" 64G
 
 if [ -f "$FLAG_FILE" ]; then
-    echo "✅ Đã cài đặt xong. Đang boot thẳng vào Windows..."
+    echo "✅ Boot thẳng vào ổ cứng từ: $DISK_FILE"
     qemu-system-x86_64 -enable-kvm -cpu host -smp "$CORES" -m "$RAM" \
     -machine q35 -drive file="$DISK_FILE",if=ide,format=qcow2 \
     -netdev user,id=net0,hostfwd=tcp::3389-:3389 -device e1000,netdev=net0 \
     -vnc :0 -usb -device usb-tablet
 else
-    echo "⚠️ CHẾ ĐỘ CÀI ĐẶT: Đang tải ISO và chuẩn bị máy ảo..."
+    echo "⚠️ CHẾ ĐỘ CÀI ĐẶT"
     [ -f "$ISO_FILE" ] || wget -O "$ISO_FILE" "$ISO_URL"
     
     qemu-system-x86_64 -enable-kvm -cpu host -smp "$CORES" -m "$RAM" \
@@ -86,18 +86,11 @@ else
     -vnc :0 -usb -device usb-tablet &
     
     QEMU_PID=$!
-    
-    echo "--------------------------------------------------------"
-    echo "👉 SAU KHI CÀI WINDOWS XONG, HÃY GÕ CHỮ: xong"
-    echo "👉 Lệnh này sẽ tạo file flag để lần sau không phải cài lại."
-    echo "--------------------------------------------------------"
-    
     while true; do
-        read -p "Trạng thái cài đặt: " STATUS
-        if [ "$STATUS" = "xong" ]; then
+        read -p "Nhập 'xong' khi cài xong: " CMD
+        if [ "$CMD" = "xong" ]; then
             touch "$FLAG_FILE"
-            send_tele "✅ Chúc mừng! Bạn đã cài đặt thành công và tạo file flag."
-            echo "✅ Đã ghi nhận. Hãy khởi động lại script để vào Windows trực tiếp."
+            send_tele "✅ Đã tạo file flag tại $WORKDIR"
             kill $QEMU_PID
             exit 0
         fi
